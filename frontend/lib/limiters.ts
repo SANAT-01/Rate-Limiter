@@ -1,13 +1,25 @@
 import http from "node:http";
+import { getServiceStatus } from "./docker";
 import type { LimiterConfig, LimiterInfo } from "./types";
 
 // Limiter admin APIs, reached directly on the compose network (nginx blocks /admin).
 export const LIMITERS = ["limiter1", "limiter2"] as const;
 
+const REQUEST_TIMEOUT_MS = 800;
+
 // Plain http.request rather than fetch(): Node's fetch (undici) has known
 // DNS/connect hangs resolving container hostnames under Alpine/musl in Docker —
 // http.request doesn't hit that path, and it's what the limiter's own
 // request-forwarding already uses reliably.
+//
+// A STOPPED container's network endpoint is torn down, so connecting to it
+// doesn't fail fast (refused) — it hangs until this timeout. Worse: dns.lookup()
+// runs on libuv's threadpool (4 threads by default, shared by the whole process),
+// so a few of these hangs in flight — e.g. from the dashboard's own 3s polling —
+// can starve completely unrelated lookups elsewhere in the app. getLimiter()
+// below checks Docker's own view of the container first and skips the network
+// call entirely when it's not running, so a stopped replica fails instantly
+// instead of occupying a thread for up to REQUEST_TIMEOUT_MS.
 function request<T>(name: string, path: string, options: { method?: string; body?: string } = {}): Promise<T> {
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -16,7 +28,7 @@ function request<T>(name: string, path: string, options: { method?: string; body
         port: 9000,
         path,
         method: options.method || "GET",
-        timeout: 2000,
+        timeout: REQUEST_TIMEOUT_MS,
         headers: options.body
           ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(options.body) }
           : undefined,
@@ -57,6 +69,16 @@ function message(err: unknown): string {
 }
 
 export async function getLimiter(name: string): Promise<LimiterInfo> {
+  try {
+    // Docker already knows if this container is running — skip the network
+    // round trip entirely when it isn't, rather than hanging on a dead endpoint.
+    const status = await getServiceStatus(name as "limiter1" | "limiter2");
+    if (status.state !== "running") {
+      return { name, online: false, error: `container is ${status.state}` };
+    }
+  } catch {
+    // Docker socket check failed; fall through and let the direct HTTP call decide.
+  }
   try {
     const [config, stats] = await Promise.all([
       get<LimiterInfo["config"]>(name, "/admin/config"),

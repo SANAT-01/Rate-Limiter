@@ -71,6 +71,14 @@ services:
       # in Docker; this makes dns.lookup() try IPv4 first instead of racing/
       # stalling on IPv6, which these internal networks don't use anyway.
       NODE_OPTIONS: "--dns-result-order=ipv4first"
+      # dns.lookup() (used by http.request) runs on libuv's threadpool, 4 threads
+      # by default for the WHOLE process. A stopped limiter's DNS/connect attempt
+      # can hang for the admin-check timeout instead of failing fast, and with
+      # only 4 threads a couple of those in flight (e.g. from the dashboard's own
+      # 3s polling) can starve unrelated lookups elsewhere in the app. More
+      # headroom here; lib/limiters.ts also skips the network call entirely for
+      # containers Docker already reports as not running.
+      UV_THREADPOOL_SIZE: "16"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

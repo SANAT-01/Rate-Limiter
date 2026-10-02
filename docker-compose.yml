@@ -67,6 +67,10 @@ services:
     user: root
     environment:
       LB_URL: http://lb:8080
+      # Node's fetch()/undici has known DNS resolution hangs under Alpine (musl)
+      # in Docker; this makes dns.lookup() try IPv4 first instead of racing/
+      # stalling on IPv6, which these internal networks don't use anyway.
+      NODE_OPTIONS: "--dns-result-order=ipv4first"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

@@ -1,7 +1,14 @@
+import http from "node:http";
 import { NextRequest } from "next/server";
 import type { HammerEntry } from "@/lib/types";
 
-const LB_URL = process.env.LB_URL || "http://localhost:8090";
+// Parsed once: host/port for plain http.request rather than fetch(). Node's
+// fetch (undici) has known DNS/connect hangs resolving container hostnames
+// under Alpine/musl in Docker; http.request doesn't hit that path.
+const LB = new URL(process.env.LB_URL || "http://localhost:8090");
+const LB_HOST = LB.hostname;
+const LB_PORT = Number(LB.port) || (LB.protocol === "https:" ? 443 : 80);
+const REQUEST_TIMEOUT_MS = 5000;
 const MAX_RUN_MS = 120_000;
 
 function clampInt(v: unknown, min: number, max: number, fallback: number): number {
@@ -10,8 +17,13 @@ function clampInt(v: unknown, min: number, max: number, fallback: number): numbe
   return Math.min(max, Math.max(min, Math.trunc(n)));
 }
 
-function numHeader(res: Response, name: string): number | null {
-  const v = res.headers.get(name);
+function headerStr(headers: http.IncomingHttpHeaders, name: string): string | null {
+  const v = headers[name];
+  return typeof v === "string" ? v : Array.isArray(v) ? v[0] ?? null : null;
+}
+
+function headerNum(headers: http.IncomingHttpHeaders, name: string): number | null {
+  const v = headerStr(headers, name);
   return v === null ? null : Number(v);
 }
 
@@ -22,6 +34,28 @@ function sleep(ms: number, signal: AbortSignal) {
       clearTimeout(t);
       resolve();
     });
+  });
+}
+
+function sendRequest(client: string): Promise<{ status: number; headers: http.IncomingHttpHeaders }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: LB_HOST,
+        port: LB_PORT,
+        path: "/",
+        method: "GET",
+        headers: { "X-Client": client },
+        timeout: REQUEST_TIMEOUT_MS,
+      },
+      (res) => {
+        res.on("data", () => {}); // drain the body; we only need status + headers
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers }));
+      }
+    );
+    req.on("timeout", () => req.destroy(new Error("request timed out")));
+    req.on("error", reject);
+    req.end();
   });
 }
 
@@ -49,19 +83,18 @@ export async function POST(request: NextRequest) {
   async function fire(i: number, client: string): Promise<HammerEntry> {
     const sent = Date.now();
     try {
-      const res = await fetch(`${LB_URL}/`, { headers: { "X-Client": client }, cache: "no-store" });
-      await res.arrayBuffer();
+      const { status, headers } = await sendRequest(client);
       return {
         i,
         t: sent - start,
         latencyMs: Date.now() - sent,
         client,
-        status: res.status,
-        limiter: res.headers.get("x-limiter"),
-        remaining: numHeader(res, "x-ratelimit-remaining"),
-        retryAfter: numHeader(res, "retry-after"),
-        algorithm: res.headers.get("x-ratelimit-algorithm"),
-        backend: res.headers.get("x-ratelimit-backend"),
+        status,
+        limiter: headerStr(headers, "x-limiter"),
+        remaining: headerNum(headers, "x-ratelimit-remaining"),
+        retryAfter: headerNum(headers, "retry-after"),
+        algorithm: headerStr(headers, "x-ratelimit-algorithm"),
+        backend: headerStr(headers, "x-ratelimit-backend"),
       };
     } catch (err) {
       return {

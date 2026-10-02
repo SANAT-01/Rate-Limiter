@@ -1,17 +1,55 @@
+import http from "node:http";
 import type { LimiterConfig, LimiterInfo } from "./types";
 
 // Limiter admin APIs, reached directly on the compose network (nginx blocks /admin).
 export const LIMITERS = ["limiter1", "limiter2"] as const;
 
-async function call<T>(name: string, path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`http://${name}:9000${path}`, {
-    ...init,
-    cache: "no-store",
-    signal: AbortSignal.timeout(2000),
+// Plain http.request rather than fetch(): Node's fetch (undici) has known
+// DNS/connect hangs resolving container hostnames under Alpine/musl in Docker —
+// http.request doesn't hit that path, and it's what the limiter's own
+// request-forwarding already uses reliably.
+function request<T>(name: string, path: string, options: { method?: string; body?: string } = {}): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: name,
+        port: 9000,
+        path,
+        method: options.method || "GET",
+        timeout: 2000,
+        headers: options.body
+          ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(options.body) }
+          : undefined,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          let body: Record<string, unknown> = {};
+          try {
+            body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
+          } catch {
+            // non-JSON body; fall through with an empty object
+          }
+          const status = res.statusCode ?? 0;
+          if (status >= 200 && status < 300) resolve(body as T);
+          else reject(new Error(typeof body.error === "string" ? body.error : `HTTP ${status}`));
+        });
+      }
+    );
+    req.on("timeout", () => req.destroy(new Error("request timed out")));
+    req.on("error", reject);
+    if (options.body) req.write(options.body);
+    req.end();
   });
-  const body = await res.json();
-  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-  return body as T;
+}
+
+function get<T>(name: string, path: string): Promise<T> {
+  return request<T>(name, path);
+}
+
+function post(name: string, path: string, body: unknown) {
+  return request(name, path, { method: "POST", body: JSON.stringify(body) });
 }
 
 function message(err: unknown): string {
@@ -21,8 +59,8 @@ function message(err: unknown): string {
 export async function getLimiter(name: string): Promise<LimiterInfo> {
   try {
     const [config, stats] = await Promise.all([
-      call<LimiterInfo["config"]>(name, "/admin/config"),
-      call<LimiterInfo["stats"]>(name, "/admin/stats"),
+      get<LimiterInfo["config"]>(name, "/admin/config"),
+      get<LimiterInfo["stats"]>(name, "/admin/stats"),
     ]);
     return { name, online: true, config, stats };
   } catch (err) {
@@ -32,14 +70,6 @@ export async function getLimiter(name: string): Promise<LimiterInfo> {
 
 export function getLimiters(): Promise<LimiterInfo[]> {
   return Promise.all(LIMITERS.map(getLimiter));
-}
-
-function post(name: string, path: string, body: unknown) {
-  return call(name, path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
 }
 
 async function onEach(fn: (name: string) => Promise<unknown>) {

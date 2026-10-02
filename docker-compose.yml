@@ -19,7 +19,7 @@ services:
       RATE_LIMIT: "10"
       WINDOW_SECONDS: "60"
       # Local in-memory counters to start — centralizing them is the student's fix.
-      REDIS_ENABLED: "false"
+      REDIS_ENABLED: "true"
       FAIL_MODE: "open"
       REDISHOST: redis
       APIHOST: api
@@ -34,7 +34,7 @@ services:
       LIMITER_NAME: limiter2
       RATE_LIMIT: "10"
       WINDOW_SECONDS: "60"
-      REDIS_ENABLED: "false"
+      REDIS_ENABLED: "true"
       FAIL_MODE: "open"
       REDISHOST: redis
       APIHOST: api

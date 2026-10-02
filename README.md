@@ -1,4 +1,4 @@
-Welcome to the Rate-Limit It hands-on lab!
+Welcome to the Rate-Limit It hands-on lab! - https://ratelimit.sanattudu.tech/
 
 > **Stack note**: the limiter and api services are Node.js + Express
 > (`backend/limiter`, `backend/api`). Run them locally with `npm run dev` (nodemon

@@ -13,6 +13,8 @@ module.exports = [
         module: 'writable',
         Buffer: 'readonly',
         __dirname: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
       },
     },
     rules: {

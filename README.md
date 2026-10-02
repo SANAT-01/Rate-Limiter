@@ -1,9 +1,10 @@
 Welcome to the Rate-Limit It hands-on lab!
 
-> **Stack note**: the limiter and api services are implemented in Node.js
-> (`backend/limiter`, `backend/api`, no third-party dependencies — same design as
-> the original). A Next.js dashboard in `frontend/` lets you run every step below
-> by clicking buttons instead of typing commands; see [frontend/README.md](frontend/README.md).
+> **Stack note**: the limiter and api services are Node.js + Express
+> (`backend/limiter`, `backend/api`). Run them locally with `npm run dev` (nodemon
+> restarts on save); Docker always runs the production `node index.js`. A Next.js
+> dashboard in `frontend/` lets you run every step below by clicking buttons instead
+> of typing commands; see [frontend/README.md](frontend/README.md).
 
 ## Architecture
 
@@ -55,9 +56,9 @@ flowchart TB
 | Component | Tech | Port | Responsibility | Code |
 | --- | --- | --- | --- | --- |
 | **lb** | nginx | `8090` on host → `8080` | The gateway. Picks a limiter replica per request (~50/50), re-resolving DNS each time so `limiter2` can come and go, and falls back to `limiter1` if the pick is down. Forwards `X-Client`. Returns 404 for `/admin`. | [backend/lb/nginx.conf](backend/lb/nginx.conf) |
-| **limiter1 / limiter2** | Node.js, no dependencies | `9000` (internal) | Identifies the client (`X-Client` header, else IP), runs the configured algorithm, proxies allowed requests to `api`, answers `429` + `Retry-After` when over the limit, adds `X-RateLimit-*` headers, logs one ALLOW/DENY line per request, and serves the admin API. | [backend/limiter](backend/limiter) |
+| **limiter1 / limiter2** | Node.js + Express | `9000` (internal) | Identifies the client (`X-Client` header, else IP), runs the configured algorithm, proxies allowed requests to `api`, answers `429` + `Retry-After` when over the limit, adds `X-RateLimit-*` headers, logs one ALLOW/DENY line per request, and serves the admin API. | [backend/limiter](backend/limiter) |
 | **redis** | Redis 7 | `6379` (internal) | The shared counter store. Each decision is a single Lua script, so check-and-update is atomic across replicas. Keys expire on their own. | — |
-| **api** | Node.js, no dependencies | `8000` (internal) | The protected backend. Returns `{"ok": true}`; it exists so the limiter has something to guard. | [backend/api](backend/api) |
+| **api** | Node.js + Express | `8000` (internal) | The protected backend. Returns `{"ok": true}`; it exists so the limiter has something to guard. | [backend/api](backend/api) |
 | **frontend** | Next.js 16 | `127.0.0.1:3000` | Dashboard UI plus server-side API routes: traffic generator, limiter admin, guided scenarios, Docker control, logs. | [frontend](frontend) |
 | **Docker Engine** | — | socket | Mounted into `frontend` so the dashboard can start/stop `limiter2` and `redis` (scaling and outages) and read container logs. | — |
 | **hammer.sh** | sh + curl | — | CLI load generator: N requests as one client, counts 200 vs 429. | [hammer.sh](hammer.sh) |
@@ -183,7 +184,7 @@ Docker network (which is how the dashboard uses it).
 
 A small limiter service sits in front of an API, behind an nginx load balancer, exactly the gateway placement from the video. The limiter counts each client's requests in a fixed window (limit 10 per 60s) and answers over-limit calls with 429 + Retry-After. The counters start out in-process memory, and that's the whole point: you'll run ONE limiter and watch the limit hold, add a SECOND limiter and watch 2× the allowed traffic get through, then fix it with a shared atomic Redis counter—and finish by breaking Redis to feel fail-open vs fail-closed.
 
-The stack lives in /root/lab2 as a docker-compose project: lb (nginx on port 8090), limiter1/limiter2, api, and redis. Fire traffic with the helper ./hammer.sh.
+The stack lives in /Rate-Limiter as a docker-compose project: lb (nginx on port 8090), limiter1/limiter2, api, and redis. Fire traffic with the helper ./hammer.sh.
 
 Learning outcomes:
 
@@ -194,9 +195,9 @@ Decide fail-open vs fail-closed when the counter store dies
 
 ---
 
-From /root/lab2, bring up everything except limiter2; one limiter is enough for now:
+From /Rate-Limiter, bring up everything except limiter2; one limiter is enough for now:
 
-cd /root/lab2
+cd /Rate-Limiter
 docker compose up -d lb limiter1 api redis
 sleep 5
 curl -si -H 'X-Client: me' localhost:8090/ | grep -E 'HTTP|X-RateLimit'
@@ -207,7 +208,7 @@ You should get a 200 from the api, plus X-RateLimit-Limit: 10 and a shrinking X-
 
 One limiter, one truth. Hammer the API as a single client and watch the limit hold exactly:
 
-cd /root/lab2
+cd /Rate-Limiter
 CLIENT="blocked-demo-$(date +%s)"
 ./hammer.sh 30 "$CLIENT"
 docker compose logs limiter1 | tail -15
@@ -219,7 +220,7 @@ The hammer fires 30 requests as one fresh client: exactly 10 allowed, 20 denied 
 
 The fail moment: scale the limiter. Traffic doubled, so you do what everyone does: add a second replica.
 
-cd /root/lab2
+cd /Rate-Limiter
 docker compose up -d limiter2
 sleep 3
 ./hammer.sh
@@ -231,9 +232,9 @@ docker compose logs limiter2 | tail -5
 
 ---
 
-The fix—one shared counter. Each limiter has a flag that decides whether it counts requests locally (in its own memory) or against a shared store both replicas can see. Point BOTH limiters at that shared store in /root/lab2/docker-compose.yml, recreate them, and hammer again:
+The fix—one shared counter. Each limiter has a flag that decides whether it counts requests locally (in its own memory) or against a shared store both replicas can see. Point BOTH limiters at that shared store in /Rate-Limiter/docker-compose.yml, recreate them, and hammer again:
 
-cd /root/lab2
+cd /Rate-Limiter
 docker compose up -d limiter1 limiter2
 sleep 3
 ./hammer.sh
@@ -244,7 +245,7 @@ Back to exactly 10 allowed: both replicas now INCR the same key (rate:<client>:<
 
 Break the counter store. The limit now depends on Redis. So, what happens when Redis dies? Stop it and send traffic:
 
-cd /root/lab2
+cd /Rate-Limiter
 docker compose stop redis
 ./hammer.sh
 docker compose logs limiter1 | tail -5

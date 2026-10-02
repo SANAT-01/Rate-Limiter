@@ -18,12 +18,12 @@
  *   ALLOW <client> 3/10 (local|redis) fixed-window [limiter1]
  *   DENY  <client> 11/10 -> 429 (redis) fixed-window [limiter1]
  *   REDIS DOWN — failing OPEN (request allowed, uncounted) [limiter1]
- *
- * No third-party dependencies — Node built-ins only.
  */
 'use strict';
 
 const http = require('http');
+
+const express = require('express');
 
 const { config, runtime, updateRuntime } = require('./src/config');
 const { redisCommand } = require('./src/redis');
@@ -53,11 +53,8 @@ async function decide(client, cfg) {
 // ----------------------------------- HTTP --------------------------------------
 function sendJson(res, code, obj, extraHeaders) {
   const data = JSON.stringify(obj) + '\n';
-  res.writeHead(code, Object.assign(
-    { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
-    extraHeaders || {}
-  ));
-  res.end(data);
+  res.set(extraHeaders || {});
+  res.status(code).type('application/json').send(data);
 }
 
 function rateHeaders(cfg, backend, remaining) {
@@ -79,81 +76,13 @@ function forward(req, res, headers) {
       proxyRes.on('data', (c) => chunks.push(c));
       proxyRes.on('end', () => {
         const body = Buffer.concat(chunks);
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': body.length, ...headers });
-        res.end(body);
+        res.set({ 'Content-Type': 'application/json', ...headers });
+        res.status(200).send(body);
       });
     }
   );
   proxyReq.on('error', () => sendJson(res, 502, { error: 'api unavailable' }, headers));
   proxyReq.end();
-}
-
-function readJson(req, maxBytes = 10_000) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    req.on('data', (c) => {
-      size += c.length;
-      if (size > maxBytes) {
-        reject(new Error('request body too large'));
-        req.destroy();
-        return;
-      }
-      chunks.push(c);
-    });
-    req.on('end', () => {
-      try {
-        resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {});
-      } catch {
-        reject(new Error('invalid JSON body'));
-      }
-    });
-    req.on('error', reject);
-  });
-}
-
-async function handleAdmin(req, res, path) {
-  if (path === '/admin/config' && req.method === 'GET') {
-    return sendJson(res, 200, { name: config.name, ...runtime });
-  }
-  if (path === '/admin/config' && req.method === 'POST') {
-    let body;
-    try {
-      body = await readJson(req);
-    } catch (err) {
-      return sendJson(res, 400, { error: err.message });
-    }
-    const result = updateRuntime(body);
-    if (!result.ok) return sendJson(res, 400, { error: result.errors.join('; ') });
-    logEvent('info', 'config updated', result.config);
-    return sendJson(res, 200, { name: config.name, ...result.config });
-  }
-  if (path === '/admin/stats' && req.method === 'GET') {
-    return sendJson(res, 200, { name: config.name, ...stats });
-  }
-  if (path === '/admin/reset' && req.method === 'POST') {
-    resetLocal();
-    stats = freshStats();
-    let redisFlushed = false;
-    try {
-      // This Redis exists only for the lab's counters, so wiping it is the reset.
-      await redisCall('FLUSHDB');
-      redisFlushed = true;
-    } catch {}
-    logEvent('info', 'counters reset', { redisFlushed });
-    return sendJson(res, 200, { name: config.name, reset: true, redisFlushed });
-  }
-  return sendJson(res, 404, { error: 'not found' });
-}
-
-async function handleReadyz(res) {
-  if (!runtime.redisEnabled) return sendJson(res, 200, { status: 'ready', backend: 'local' });
-  try {
-    await redisCall('PING');
-    sendJson(res, 200, { status: 'ready', backend: 'redis' });
-  } catch (err) {
-    sendJson(res, 503, { status: 'not-ready', reason: err.message });
-  }
 }
 
 async function handleLimited(req, res) {
@@ -191,20 +120,62 @@ async function handleLimited(req, res) {
   forward(req, res, headers);
 }
 
-const server = http.createServer(async (req, res) => {
-  const path = req.url.split('?')[0];
-  if (path.startsWith('/admin/')) return handleAdmin(req, res, path);
-  if (req.method !== 'GET') {
-    res.writeHead(404);
-    res.end();
-    return;
+// ----------------------------------- app ----------------------------------------
+const app = express();
+app.disable('x-powered-by');
+
+app.get('/healthz', (req, res) => sendJson(res, 200, { status: 'ok' }));
+
+app.get('/readyz', async (req, res) => {
+  if (!runtime.redisEnabled) return sendJson(res, 200, { status: 'ready', backend: 'local' });
+  try {
+    await redisCall('PING');
+    sendJson(res, 200, { status: 'ready', backend: 'redis' });
+  } catch (err) {
+    sendJson(res, 503, { status: 'not-ready', reason: err.message });
   }
-  if (path === '/healthz') return sendJson(res, 200, { status: 'ok' });
-  if (path === '/readyz') return handleReadyz(res);
-  return handleLimited(req, res);
 });
 
-server.listen(config.port, '0.0.0.0', () => {
+app.get('/admin/config', (req, res) => sendJson(res, 200, { name: config.name, ...runtime }));
+
+app.post('/admin/config', express.json({ limit: '10kb' }), (req, res) => {
+  const result = updateRuntime(req.body || {});
+  if (!result.ok) return sendJson(res, 400, { error: result.errors.join('; ') });
+  logEvent('info', 'config updated', result.config);
+  sendJson(res, 200, { name: config.name, ...result.config });
+});
+
+app.get('/admin/stats', (req, res) => sendJson(res, 200, { name: config.name, ...stats }));
+
+app.post('/admin/reset', async (req, res) => {
+  resetLocal();
+  stats = freshStats();
+  let redisFlushed = false;
+  try {
+    // This Redis exists only for the lab's counters, so wiping it is the reset.
+    await redisCall('FLUSHDB');
+    redisFlushed = true;
+  } catch {}
+  logEvent('info', 'counters reset', { redisFlushed });
+  sendJson(res, 200, { name: config.name, reset: true, redisFlushed });
+});
+
+// Any other path/method under /admin is unknown.
+app.all('/admin/*', (req, res) => sendJson(res, 404, { error: 'not found' }));
+
+// Everything else is a request to rate-limit and forward to the api.
+app.get('*', handleLimited);
+
+// Non-GET, non-admin requests have nothing to match.
+app.use((req, res) => res.status(404).end());
+
+// express.json() parse errors (bad JSON, body too large) land here.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  sendJson(res, 400, { error: err.type === 'entity.too.large' ? 'request body too large' : 'invalid JSON body' });
+});
+
+const server = app.listen(config.port, '0.0.0.0', () => {
   logEvent('info', `limiter listening on :${config.port}`, { ...runtime });
 });
 

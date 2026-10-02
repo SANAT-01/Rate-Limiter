@@ -1,11 +1,13 @@
-# api — the protected backend. No dependencies, so the build needs no npm
-# registry access; only the node:20-alpine base is pulled.
+# api — the protected backend, served with Express.
 FROM node:20-alpine
 
 ENV NODE_ENV=production
 WORKDIR /app
 
-COPY --chown=node:node package.json index.js ./
+COPY --chown=node:node package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY --chown=node:node index.js ./
 COPY --chown=node:node src ./src
 
 USER node

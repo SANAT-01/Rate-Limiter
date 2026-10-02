@@ -1,0 +1,67 @@
+services:
+  lb:
+    image: nginx:alpine
+    container_name: lb
+    depends_on:
+      - limiter1
+    ports:
+      - "8090:8080"
+    volumes:
+      - ./backend/lb/nginx.conf:/etc/nginx/nginx.conf:ro
+
+  # Two explicit limiter replicas so nginx round-robins deterministically.
+  # The lab starts with ONLY limiter1 up — starting limiter2 is the fail moment.
+  limiter1:
+    build: ./backend/limiter
+    container_name: limiter1
+    environment:
+      LIMITER_NAME: limiter1
+      ALGORITHM: "fixed-window"
+      RATE_LIMIT: "10"
+      WINDOW_SECONDS: "60"
+      REDIS_ENABLED: "true"
+      FAIL_MODE: "open"
+      REDISHOST: redis
+      APIHOST: api
+    depends_on:
+      - api
+      - redis
+
+  limiter2:
+    build: ./backend/limiter
+    container_name: limiter2
+    environment:
+      LIMITER_NAME: limiter2
+      ALGORITHM: "fixed-window"
+      RATE_LIMIT: "10"
+      WINDOW_SECONDS: "60"
+      REDIS_ENABLED: "true"
+      FAIL_MODE: "open"
+      REDISHOST: redis
+      APIHOST: api
+    depends_on:
+      - api
+      - redis
+
+  api:
+    build: ./backend/api
+    container_name: api
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+
+  # Dashboard. The Docker socket lets it start/stop containers and read logs,
+  # which is root-equivalent on the host — keep this to local use.
+  frontend:
+    build: ./frontend
+    container_name: frontend
+    user: root
+    environment:
+      LB_URL: http://lb:8080
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - lb

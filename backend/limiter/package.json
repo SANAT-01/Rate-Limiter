@@ -1,0 +1,16 @@
+{
+  "name": "limiter",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "eslint": "^9.13.0"
+  }
+}

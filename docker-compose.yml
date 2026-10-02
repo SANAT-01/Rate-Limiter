@@ -1,0 +1,51 @@
+services:
+  lb:
+    image: nginx:alpine
+    container_name: lb
+    depends_on:
+      - limiter1
+    ports:
+      - "8090:8080"
+    volumes:
+      - ./lb/nginx.conf:/etc/nginx/nginx.conf:ro
+
+  # Two explicit limiter replicas so nginx round-robins deterministically.
+  # The lab starts with ONLY limiter1 up — starting limiter2 is the fail moment.
+  limiter1:
+    build: ./limiter
+    container_name: limiter1
+    environment:
+      LIMITER_NAME: limiter1
+      RATE_LIMIT: "10"
+      WINDOW_SECONDS: "60"
+      # Local in-memory counters to start — centralizing them is the student's fix.
+      REDIS_ENABLED: "false"
+      FAIL_MODE: "open"
+      REDISHOST: redis
+      APIHOST: api
+    depends_on:
+      - api
+      - redis
+
+  limiter2:
+    build: ./limiter
+    container_name: limiter2
+    environment:
+      LIMITER_NAME: limiter2
+      RATE_LIMIT: "10"
+      WINDOW_SECONDS: "60"
+      REDIS_ENABLED: "false"
+      FAIL_MODE: "open"
+      REDISHOST: redis
+      APIHOST: api
+    depends_on:
+      - api
+      - redis
+
+  api:
+    build: ./api
+    container_name: api
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
